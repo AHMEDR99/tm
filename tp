@@ -1,0 +1,232 @@
+cmdresetn(USART_TypeDef *usart)
+{
+    uint8_t isSensorDetected = 0;//*! variable to store the presence byte
+    uint8_t Rx=0;//*! variable to read the usart RDR buffer
+    isSensorDetected = 0;
+
+    static  uint8_t counter=0;
+
+
+    if (counter==0) {
+        /* Disable UART prescaler and outputs */
+        usart->CR1 &= ~USART_CR1_UE;
+
+        /* Set baud rate to 9600 Bps*/
+
+        setbaudrate(usart, 9600);
+
+        /* Enable UART prescaler and outputs */
+        usart->CR1 |= USART_CR1_UE;
+    counter++;
+
+    }
+
+
+    /* Check USART status register */
+    if((usart->ISR & USART_ISR_TXE)&& (counter==1))
+    { counter++;
+        /* Wait for transmission buffer empty flag */
+
+        /* Write reset command */
+        usart->TDR = DS18B20_RESET_CMD;
+    }
+
+
+
+    /* Check USART status register */
+    if((usart->ISR & USART_ISR_TC) &&(usart->ISR & USART_ISR_RXNE))
+    {
+        Rx = usart->RDR;
+
+        /* Check sensor presence */
+        if ((DS18B20_RESET_CMD != Rx) && (BIT_0 != Rx)) {
+            /* Temp sensor was detected */
+            isSensorDetected = 1;
+        } else {
+            /* Do nothing, No sensor was detected */
+        }
+
+
+        counter++;
+        /* Wait for transmission complete flag */
+    }
+
+
+if (counter==3)
+{
+    /* Disable UART prescaler and outputs */
+    usart->CR1 &= ~USART_CR1_UE;
+
+    /* Set baud rate to 115200 Bps*/
+    setbaudrate(usart,115200);
+
+    usart->CR1 |= USART_CR1_UE;
+    counter=0;
+    }
+    return isSensorDetected;
+
+
+}
+
+
+
+
+
+
+
+
+/////////////////
+
+
+DS18B20_process_addressn(USART_TypeDef *usart,uint64_t address)
+{
+
+    static uint8_t pcounter=0;
+    memset(matchrom_byte,0, sizeof(matchrom_byte)); // clear
+    uint8_t bits_ [64] ;
+    memset(bits_,0, sizeof(bits_));
+    HexToBinary(bits_,address);
+
+    uint8_t isSensorDetected_ = 0;
+    /* Send reset pulse */
+
+    if (pcounter==0) {
+        isSensorDetected_ = cmdresetn(usart);
+        if (isSensorDetected_==1)
+        {
+
+            pcounter++;
+        }
+
+    }
+    /* Check if the sensor was detected */
+    if(isSensorDetected_==1) //*!
+    {
+        if (pcounter == 1) {
+            pcounter++;
+            /* Send temperature conversion command */
+            cmdtransmit(temp_convert, sizeof(temp_convert), usart);
+
+        }
+
+    }
+
+    if ((DMA_ISR_TCIF7 & DMA1->ISR) &&(pcounter==2) )//check  if it's a transmission complete  interrupt  coming from Stream7 (USART2)
+    {
+        pcounter++;
+        DMA1_Channel7->CCR &= ~(DMA_CCR_EN); // disable Stream request since the  transmission is completed
+
+        /* Clear all interrupt flags */
+        DMA1->IFCR = (DMA_ISR_GIF7 | DMA_ISR_TEIF7 | DMA_ISR_TCIF7 | DMA_ISR_HTIF7);
+        /* Wait conversion time */
+        Time::delayMs(MAX_CONVERSION_TIME);
+    }
+
+
+
+
+    ///////////
+
+
+
+
+    /* Send reset pulse */
+    if (pcounter==3) {
+        isSensorDetected_ = cmdresetn(usart);
+        if (isSensorDetected_ == 1) {
+
+            pcounter++;
+        }
+
+    }
+
+        if (pcounter==4)
+        {
+
+            /* Enable temperature data reception with DMA */
+
+            cmdreceive(temperatureData2, sizeof(temperatureData2),usart);
+
+            /* Send temperature read command */
+            memcpy(matchrom_byte ,match_rom, sizeof(match_rom)); // append match rom command x55
+            memcpy(matchrom_byte+ sizeof(match_rom),bits_, sizeof(bits_));// append the 64-bits address
+            memcpy(matchrom_byte+ sizeof(match_rom)+ sizeof(bits_) ,temp_read_BEFF, sizeof(temp_read_BEFF));//append temp read command
+
+            cmdtransmit(matchrom_byte, sizeof(matchrom_byte),usart);
+            /* Check temperature data received flag */
+            pcounter++;
+        }
+
+
+        if ((DMA_ISR_TCIF7 & DMA1->ISR)&&(pcounter==5))//check  if it's a transmission complete  interrupt  coming from Stream7 (USART2)
+        {
+
+            DMA1_Channel7->CCR &=~(DMA_CCR_EN); // disable Stream request since the  transmission is completed
+            pcounter++;
+            /* Clear all interrupt flags */
+            DMA1->IFCR = (DMA_ISR_GIF7| DMA_ISR_TEIF7 | DMA_ISR_TCIF7| DMA_ISR_HTIF7);
+            /* Wait conversion time */
+
+        }
+
+
+        if(DMA_ISR_TCIF6 & DMA1->ISR)//check  if it's a transmission complete  interrupt  coming from Stream6 (USART2)
+        {
+
+            DMA1_Channel6->CCR &=~(DMA_CCR_EN); // disable Stream request since the  transmission is completed
+            /* Set transfer complete flag */
+            temperatureDataReceived = true;
+            /* Clear all interrupt flags */
+            DMA1->IFCR = (DMA_ISR_GIF6| DMA_ISR_TEIF6 | DMA_ISR_TCIF6| DMA_ISR_HTIF6);
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+    if (temperatureDataReceived== true)
+    {
+
+
+
+        /* Reset temperature data received flag */
+        temperatureDataReceived = false;
+
+        /* Temporarily variable for extracting temperature data */
+        uint16_t temperature = 0;
+
+        /* Extract new temperature data */
+        for (int idx =80 ; idx < 96; idx++)
+        {
+            if (BIT_1 == temperatureData2[idx])
+            {
+                /* Bit value is 1 */
+                temperature = (temperature >> 1) | 0x8000;
+            }
+            else
+            {
+                /* Bit value is 0 */
+                temperature = temperature >> 1;
+            }
+        }
+
+        /* Copying new temperature data and divide by 16 for fraction part */
+        currentTemperature = (float) temperature / (float) 16;
+
+        memset(temperatureData2,0, sizeof(temperatureData2)); // clear receiving buffer
+        pcounter=0; // reset state
+
+
+
+    }
+
+
+    return currentTemperature;
+}
